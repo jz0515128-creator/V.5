@@ -1,0 +1,60 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Unpack newest source zip
+        run: |
+          ZIP=$(ls xilian_ai_stage2_v*.zip | sort -V | tail -1)
+          echo "Using $ZIP"
+          mkdir -p /tmp/src
+          unzip -q "$ZIP" -d /tmp/src
+          DIR=$(find /tmp/src -maxdepth 1 -mindepth 1 -type d | head -1)
+          test -f "$DIR/buildozer.spec"
+          echo "PROJ=$DIR" >> "$GITHUB_ENV"
+      - name: Unit tests (no Android needed)
+        run: |
+          cd "$PROJ"
+          python -m unittest discover -s tests -p "test_autoreply.py" -v
+          python -m unittest discover -s tests -p "test_manifest_hook.py" -v
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses5-dev libffi-dev libssl-dev
+          pip install buildozer cython==0.29.36
+      - name: Snapshot diff regression tests
+        run: |
+          cd "$PROJ"
+          mkdir -p /tmp/xilian-snapshot-test
+          javac -d /tmp/xilian-snapshot-test android_src/org/xilian/xilianai/SnapshotDiff.java android_src/org/xilian/xilianai/SendButtonMatcher.java tests/java/SnapshotDiffTest.java tests/java/SendButtonMatcherTest.java
+          java -cp /tmp/xilian-snapshot-test org.xilian.xilianai.SnapshotDiffTest
+          java -cp /tmp/xilian-snapshot-test org.xilian.xilianai.SendButtonMatcherTest
+      - name: Build
+        run: |
+          cd "$PROJ"
+          buildozer -v android debug
+      - name: Verify the APK manifest
+        run: |
+          cd "$PROJ"
+          AAPT=$(find "$HOME/.buildozer" -path '*build-tools*' -name aapt | sort | tail -1)
+          APK=$(ls bin/*.apk | head -1)
+          "$AAPT" dump xmltree "$APK" AndroidManifest.xml > manifest.txt
+          APPS=$(grep -c "E: application " manifest.txt || true)
+          SERVICE=$(grep -c "DouyinAccessibilityService" manifest.txt || true)
+          echo "application elements: $APPS, service references: $SERVICE"
+          test "$APPS" = "1"
+          test "$SERVICE" -ge 1
+          grep -q "BIND_ACCESSIBILITY_SERVICE" manifest.txt
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp bin/*.apk "$GITHUB_WORKSPACE/out/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xilian-ai-apk
+          path: out/*.apk
